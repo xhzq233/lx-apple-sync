@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lx-apple-sync"
+version = "0.1.0"
+description = "Download LX playlists and import them into native iPhone/iPad Music with static lyrics"
+requires-python = ">=3.12"
+dependencies = ["pymobiledevice3==11.20.1", "mutagen==1.47.0"]
+license = "MIT"
+
+[project.scripts]
+lxsync = "lx_apple_sync.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lx_apple_sync"]

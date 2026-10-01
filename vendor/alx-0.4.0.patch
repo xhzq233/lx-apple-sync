@@ -1,0 +1,198 @@
+diff --git a/crates/lux-cli/src/cmd/download.rs b/crates/lux-cli/src/cmd/download.rs
+index c0d18fc..b2d6272 100644
+--- a/crates/lux-cli/src/cmd/download.rs
++++ b/crates/lux-cli/src/cmd/download.rs
+@@ -321,13 +321,26 @@ pub async fn run(action: DownloadAction, json: bool) -> Result<()> {
+ /// On Linux the process identity is verified against procfs: the PID is only
+ /// accepted when `/proc/<pid>/comm` (or, as fallback, the basename of the
+ /// `/proc/<pid>/exe` symlink) is exactly `alx` or starts with `alx`. A
+-/// recycled PID owned by any other program therefore counts as dead. Where
+-/// `proc_dir` itself is absent (macOS/Windows have no procfs) identity cannot
+-/// be verified and every parseable PID is assumed alive.
++/// recycled PID owned by any other program therefore counts as dead. On
++/// macOS, `ps` verifies the executable name when procfs is absent.
+ ///
+ /// `proc_dir` is a parameter seam so tests can inject a fake `/proc` tree.
+ pub(crate) fn pid_is_live_daemon(pid: u32, proc_dir: &Path) -> bool {
+     if !proc_dir.is_dir() {
++        #[cfg(target_os = "macos")]
++        return Command::new("ps")
++            .args(["-p", &pid.to_string(), "-o", "comm="])
++            .output()
++            .ok()
++            .filter(|output| output.status.success())
++            .and_then(|output| String::from_utf8(output.stdout).ok())
++            .and_then(|name| {
++                Path::new(name.trim())
++                    .file_name()
++                    .map(|name| process_name_is_alx(&name.to_string_lossy()))
++            })
++            .unwrap_or(false);
++        #[cfg(not(target_os = "macos"))]
+         return true;
+     }
+     let entry = proc_dir.join(pid.to_string());
+@@ -380,13 +393,18 @@ pub fn ensure_daemon_running() -> Result<()> {
+         // daemon owns the file exclusively.
+         let _ = fs::remove_file(&pid_file);
+         let exe = std::env::current_exe()?;
+-        let _child = Command::new(exe)
+-            .arg("download")
++        let mut command = Command::new(exe);
++        command.arg("download")
+             .arg("daemon")
+             .stdin(std::process::Stdio::null())
+             .stdout(std::process::Stdio::null())
+-            .stderr(std::process::Stdio::null())
+-            .spawn()?;
++            .stderr(std::process::Stdio::null());
++        #[cfg(unix)]
++        {
++            use std::os::unix::process::CommandExt;
++            command.process_group(0);
++        }
++        let _child = command.spawn()?;
+     }
+ 
+     Ok(())
+@@ -809,7 +827,9 @@ async fn execute_download_with_quality(
+         .download
+         .filename_template
+         .replace("{singer}", &clean_singer)
+-        .replace("{title}", &clean_title);
++        .replace("{title}", &clean_title)
++        .replace("{id}", &task.song_id)
++        .replace("{source}", &task.source);
+     let final_filename = format!("{}.{}", final_name, extension);
+     let final_path = output_dir.join(&final_filename);
+ 
+@@ -1008,6 +1028,7 @@ mod tests {
+         let _ = fs::remove_dir_all(&proc_dir);
+     }
+ 
++    #[cfg(not(target_os = "macos"))]
+     #[test]
+     fn test_pid_identity_assumes_alive_without_procfs() {
+         // No procfs on this platform: identity cannot be verified.
+diff --git a/crates/lux-cli/src/source/mod.rs b/crates/lux-cli/src/source/mod.rs
+index 7fe9768..2eaec12 100644
+--- a/crates/lux-cli/src/source/mod.rs
++++ b/crates/lux-cli/src/source/mod.rs
+@@ -10,6 +10,22 @@ use lux_core::types::Source;
+ 
+ pub struct SourceManager;
+ 
++fn song_music_info(platform: &str, song_id: &str) -> serde_json::Value {
++    let cached = crate::library::db::get_song_from_cache(song_id, platform)
++        .ok()
++        .flatten();
++    serde_json::json!({
++        "songmid": cached.as_ref().and_then(|song| song.songmid.as_deref()).unwrap_or(song_id),
++        "songId": song_id,
++        "name": cached.as_ref().map(|song| song.name.as_str()).unwrap_or("unknown"),
++        "singer": cached.as_ref().map(|song| song.singer.as_str()).unwrap_or("unknown"),
++        "hash": cached.as_ref().and_then(|song| song.hash.as_deref()).or_else(|| (platform == "kg").then_some(song_id)),
++        "albumName": cached.as_ref().and_then(|song| song.album_name.as_deref()),
++        "albumId": cached.as_ref().and_then(|song| song.album_id.as_deref()),
++        "meta": cached.as_ref().and_then(|song| song.extra.as_deref()).and_then(|extra| serde_json::from_str::<serde_json::Value>(extra).ok()),
++    })
++}
++
+ impl Default for SourceManager {
+     fn default() -> Self {
+         Self::new()
+@@ -99,12 +115,7 @@ impl SourceManager {
+                     continue;
+                 };
+                 if let Ok(sandbox) = runtime::JsSandbox::new() {
+-                    let music_info = serde_json::json!({
+-                        "songmid": song_id,
+-                        "name": "unknown",
+-                        "singer": "unknown",
+-                        "hash": if platform == "kg" { Some(song_id) } else { None }
+-                    });
++                    let music_info = song_music_info(platform, song_id);
+ 
+                     match sandbox.execute_resolve(
+                         &script,
+@@ -254,12 +265,7 @@ impl SourceManager {
+                 continue;
+             };
+             if let Ok(sandbox) = runtime::JsSandbox::new() {
+-                let music_info = serde_json::json!({
+-                    "songmid": song_id,
+-                    "name": "unknown",
+-                    "singer": "unknown",
+-                    "hash": if platform == "kg" { Some(song_id) } else { None }
+-                });
++                let music_info = song_music_info(platform, song_id);
+ 
+                 if let Ok(lyric_str) = sandbox.execute_lyric(&script, platform, song_id, music_info)
+                 {
+diff --git a/crates/lux-cli/src/source/runtime.rs b/crates/lux-cli/src/source/runtime.rs
+index 53f35c9..79544aa 100644
+--- a/crates/lux-cli/src/source/runtime.rs
++++ b/crates/lux-cli/src/source/runtime.rs
+@@ -152,7 +152,7 @@ impl JsSandbox {
+                 super::bridge::inject_lx(&ctx, state.clone())?;
+ 
+                 // Evaluate the source JS script
+-                ctx.eval::<(), _>(script)
++                ctx.eval::<(), _>(format!("(function() {{\n{script}\n}}).call(globalThis);"))
+                     .map_err(|e| anyhow!("Failed to evaluate JS script: {}", e))?;
+ 
+                 let handler: Function = ctx
+@@ -286,7 +286,7 @@ impl JsSandbox {
+     }
+ 
+     pub fn execute_init(&self, script: &str) -> Result<serde_json::Value> {
+-        let inited_data = Arc::new(Mutex::new(None));
++        let mut init_state = None;
+ 
+         self.arm_deadline();
+         let with_res = self.context.as_ref().unwrap().with(|ctx| -> Result<()> {
+@@ -301,15 +301,14 @@ impl JsSandbox {
+             }
+             state_obj.raw_script = script.to_string();
+             let state = Arc::new(Mutex::new(state_obj));
++            init_state = Some(state.clone());
+ 
+             let res = (|| -> Result<()> {
+                 super::bridge::inject_lx(&ctx, state.clone())?;
+ 
+-                ctx.eval::<(), _>(script)
++                ctx.eval::<(), _>(format!("(function() {{\n{script}\n}}).call(globalThis);"))
+                     .map_err(|e| anyhow!("Failed to evaluate JS script during init: {}", e))?;
+ 
+-                let mut inited_guard = inited_data.lock().unwrap();
+-                *inited_guard = state.lock().unwrap().inited_data.clone();
+                 Ok(())
+             })();
+ 
+@@ -340,7 +339,7 @@ impl JsSandbox {
+         with_res?;
+         drained?;
+ 
+-        let inited = inited_data.lock().unwrap().clone();
++        let inited = init_state.and_then(|state| state.lock().unwrap().inited_data.clone());
+         inited.ok_or_else(|| anyhow!("JS source did not invoke lx.send('inited', ...)"))
+     }
+ 
+@@ -372,7 +371,7 @@ impl JsSandbox {
+                 super::bridge::inject_lx(&ctx, state.clone())?;
+ 
+                 // Evaluate the source JS script
+-                ctx.eval::<(), _>(script)
++                ctx.eval::<(), _>(format!("(function() {{\n{script}\n}}).call(globalThis);"))
+                     .map_err(|e| anyhow!("Failed to evaluate JS script for lyrics: {}", e))?;
+ 
+                 let handler: Function = ctx
+@@ -536,7 +535,7 @@ impl JsSandbox {
+                 super::bridge::inject_lx(&ctx, state.clone())?;
+ 
+                 // Evaluate the source JS script
+-                ctx.eval::<(), _>(script)
++                ctx.eval::<(), _>(format!("(function() {{\n{script}\n}}).call(globalThis);"))
+                     .map_err(|e| anyhow!("Failed to evaluate JS script for search: {}", e))?;
+ 
+                 let handler: Function = ctx
