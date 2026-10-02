@@ -168,6 +168,7 @@ def main():
         action.add_argument("--limit", type=int)
         action.add_argument("--quality", choices=["128k", "320k"], default="320k")
         action.add_argument("--output", type=Path, default=Path.home() / "Music/LX-Apple-Sync")
+        action.add_argument("--source-script", type=Path, help="本次使用的 LX JS 音源；省略时继承 GUI 当前音源")
         action.add_argument("--timeout", type=int, default=600)
         if name == "sync":
             action.add_argument("--udid")
@@ -184,9 +185,10 @@ def main():
         playlist, tracks = select_playlist(args.gui_dir, args.playlist, args.limit)
         engine = Downloader(args.state_dir, args.gui_dir, args.alx)
         output = args.output.expanduser().resolve()
-        engine.prepare(playlist, tracks, output)
+        source_name = engine.prepare(playlist, tracks, output, args.source_script)
         tracks = engine.download(tracks, output, args.quality, args.timeout)
-        manifest = dict(playlist=playlist, tracks=[{k: v for k, v in t.items() if k not in ("meta", "lrc")} for t in tracks])
+        manifest = dict(playlist=playlist, source_name=source_name,
+            tracks=[{k: v for k, v in t.items() if k not in ("meta", "lrc")} for t in tracks])
         save(engine.state / "manifests" / (playlist["id"] + ".json"), manifest)
         if args.command == "sync":
             udid = args.udid

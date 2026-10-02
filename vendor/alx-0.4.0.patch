@@ -130,19 +130,43 @@ index 7fe9768..2eaec12 100644
                  if let Ok(lyric_str) = sandbox.execute_lyric(&script, platform, song_id, music_info)
                  {
 diff --git a/crates/lux-cli/src/source/runtime.rs b/crates/lux-cli/src/source/runtime.rs
-index 53f35c9..79544aa 100644
+index 53f35c9..087dc05 100644
 --- a/crates/lux-cli/src/source/runtime.rs
 +++ b/crates/lux-cli/src/source/runtime.rs
-@@ -152,7 +152,7 @@ impl JsSandbox {
-                 super::bridge::inject_lx(&ctx, state.clone())?;
+@@ -131,30 +131,14 @@ impl JsSandbox {
+         quality: &str,
+         music_info: serde_json::Value,
+     ) -> Result<String> {
++        // Sources may register their request handler asynchronously during init.
++        self.execute_init(script)?;
+         let resolved_data = Arc::new(Mutex::new(None));
+         let resolved_err = Arc::new(Mutex::new(None));
  
-                 // Evaluate the source JS script
+         self.arm_deadline();
+         let with_res = self.context.as_ref().unwrap().with(|ctx| -> Result<()> {
+-            let meta = super::loader::parse_metadata(script).ok();
+-            let mut state_obj = SandboxState::default();
+-            if let Some(m) = meta {
+-                state_obj.name = m.name;
+-                state_obj.description = m.description.unwrap_or_default();
+-                state_obj.version = m.version.unwrap_or_default();
+-                state_obj.author = m.author.unwrap_or_default();
+-                state_obj.homepage = m.homepage.unwrap_or_default();
+-            }
+-            state_obj.raw_script = script.to_string();
+-            let state = Arc::new(Mutex::new(state_obj));
+-
+             let res = (|| -> Result<()> {
+-                super::bridge::inject_lx(&ctx, state.clone())?;
+-
+-                // Evaluate the source JS script
 -                ctx.eval::<(), _>(script)
-+                ctx.eval::<(), _>(format!("(function() {{\n{script}\n}}).call(globalThis);"))
-                     .map_err(|e| anyhow!("Failed to evaluate JS script: {}", e))?;
- 
+-                    .map_err(|e| anyhow!("Failed to evaluate JS script: {}", e))?;
+-
                  let handler: Function = ctx
-@@ -286,7 +286,7 @@ impl JsSandbox {
+                     .globals()
+                     .get("__lx_request_handler")
+@@ -286,7 +270,7 @@ impl JsSandbox {
      }
  
      pub fn execute_init(&self, script: &str) -> Result<serde_json::Value> {
@@ -151,7 +175,7 @@ index 53f35c9..79544aa 100644
  
          self.arm_deadline();
          let with_res = self.context.as_ref().unwrap().with(|ctx| -> Result<()> {
-@@ -301,15 +301,14 @@ impl JsSandbox {
+@@ -301,15 +285,14 @@ impl JsSandbox {
              }
              state_obj.raw_script = script.to_string();
              let state = Arc::new(Mutex::new(state_obj));
@@ -169,7 +193,7 @@ index 53f35c9..79544aa 100644
                  Ok(())
              })();
  
-@@ -340,7 +339,7 @@ impl JsSandbox {
+@@ -340,7 +323,7 @@ impl JsSandbox {
          with_res?;
          drained?;
  
@@ -178,21 +202,69 @@ index 53f35c9..79544aa 100644
          inited.ok_or_else(|| anyhow!("JS source did not invoke lx.send('inited', ...)"))
      }
  
-@@ -372,7 +371,7 @@ impl JsSandbox {
-                 super::bridge::inject_lx(&ctx, state.clone())?;
+@@ -351,30 +334,14 @@ impl JsSandbox {
+         _song_id: &str,
+         music_info: serde_json::Value,
+     ) -> Result<String> {
++        // Sources may register their request handler asynchronously during init.
++        self.execute_init(script)?;
+         let resolved_data = Arc::new(Mutex::new(None));
+         let resolved_err = Arc::new(Mutex::new(None));
  
-                 // Evaluate the source JS script
+         self.arm_deadline();
+         let with_res = self.context.as_ref().unwrap().with(|ctx| -> Result<()> {
+-            let meta = super::loader::parse_metadata(script).ok();
+-            let mut state_obj = SandboxState::default();
+-            if let Some(m) = meta {
+-                state_obj.name = m.name;
+-                state_obj.description = m.description.unwrap_or_default();
+-                state_obj.version = m.version.unwrap_or_default();
+-                state_obj.author = m.author.unwrap_or_default();
+-                state_obj.homepage = m.homepage.unwrap_or_default();
+-            }
+-            state_obj.raw_script = script.to_string();
+-            let state = Arc::new(Mutex::new(state_obj));
+-
+             let res = (|| -> Result<()> {
+-                super::bridge::inject_lx(&ctx, state.clone())?;
+-
+-                // Evaluate the source JS script
 -                ctx.eval::<(), _>(script)
-+                ctx.eval::<(), _>(format!("(function() {{\n{script}\n}}).call(globalThis);"))
-                     .map_err(|e| anyhow!("Failed to evaluate JS script for lyrics: {}", e))?;
- 
+-                    .map_err(|e| anyhow!("Failed to evaluate JS script for lyrics: {}", e))?;
+-
                  let handler: Function = ctx
-@@ -536,7 +535,7 @@ impl JsSandbox {
-                 super::bridge::inject_lx(&ctx, state.clone())?;
+                     .globals()
+                     .get("__lx_request_handler")
+@@ -515,30 +482,14 @@ impl JsSandbox {
+         page: usize,
+         limit: usize,
+     ) -> Result<String> {
++        // Sources may register their request handler asynchronously during init.
++        self.execute_init(script)?;
+         let resolved_data = Arc::new(Mutex::new(None));
+         let resolved_err = Arc::new(Mutex::new(None));
  
-                 // Evaluate the source JS script
+         self.arm_deadline();
+         let with_res = self.context.as_ref().unwrap().with(|ctx| -> Result<()> {
+-            let meta = super::loader::parse_metadata(script).ok();
+-            let mut state_obj = SandboxState::default();
+-            if let Some(m) = meta {
+-                state_obj.name = m.name;
+-                state_obj.description = m.description.unwrap_or_default();
+-                state_obj.version = m.version.unwrap_or_default();
+-                state_obj.author = m.author.unwrap_or_default();
+-                state_obj.homepage = m.homepage.unwrap_or_default();
+-            }
+-            state_obj.raw_script = script.to_string();
+-            let state = Arc::new(Mutex::new(state_obj));
+-
+             let res = (|| -> Result<()> {
+-                super::bridge::inject_lx(&ctx, state.clone())?;
+-
+-                // Evaluate the source JS script
 -                ctx.eval::<(), _>(script)
-+                ctx.eval::<(), _>(format!("(function() {{\n{script}\n}}).call(globalThis);"))
-                     .map_err(|e| anyhow!("Failed to evaluate JS script for search: {}", e))?;
- 
+-                    .map_err(|e| anyhow!("Failed to evaluate JS script for search: {}", e))?;
+-
                  let handler: Function = ctx
+                     .globals()
+                     .get("__lx_request_handler")

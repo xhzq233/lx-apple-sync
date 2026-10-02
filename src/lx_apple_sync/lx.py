@@ -100,17 +100,22 @@ class Downloader:
             raise RuntimeError(f"alx {args[0]} {args[1] if len(args)>1 else ''} 失败（退出码 {result.returncode}）")
         return json.loads(result.stdout) if json_output else None
 
-    def prepare(self, playlist, tracks, output):
+    def prepare(self, playlist, tracks, output, source_script=None):
         settings = json.loads((self.gui / "config_v2.json").read_text())["setting"]
-        api = next(s for s in json.loads((self.gui / "user_api.json").read_text())["userApis"] if s["id"] == settings["common.apiSource"])
-        script = api["script"]
-        if script.startswith("gz_"):
-            script = zlib.decompress(base64.b64decode(script[3:])).decode()
+        if source_script:
+            script = source_script.expanduser().read_text()
+        else:
+            api = next((s for s in json.loads((self.gui / "user_api.json").read_text())["userApis"] if s["id"] == settings["common.apiSource"]), None)
+            if not api:
+                raise ValueError("请在 LX 选中自定义音源，或用 --source-script 指定音源脚本")
+            script = api["script"]
+            if script.startswith("gz_"):
+                script = zlib.decompress(base64.b64decode(script[3:])).decode()
         source_path = self.home / "selected-source.js"
         source_path.write_text(script)
         source_path.chmod(0o600)
         self.run("source", "add", str(source_path), json_output=False)
-        source = next(s for s in self.run("source", "list") if s["name"] == api["name"])
+        source = next(s for s in self.run("source", "list") if Path(s["script_path"]).read_text() == script)
         Path(source["script_path"]).chmod(0o600)
         config = self.run("config")
         config["source"].update(priority=[source["id"]], js_priority=True)
@@ -130,6 +135,9 @@ class Downloader:
         db = sqlite3.connect(self.home / "data/agent-lx-music.db")
         now = datetime.now(timezone.utc).isoformat()
         with db:
+            db.execute("UPDATE sources SET enabled=(id=?)", (source["id"],))
+            # A new explicit batch should try its selected source again.
+            db.execute("UPDATE source_health SET consecutive_fails=0,circuit_broken_until=NULL WHERE source_id=?", (source["id"],))
             for track in tracks:
                 meta = track["meta"]
                 db.execute("UPDATE search_cache SET interval=?,album_id=?,pic_url=?,extra=? WHERE song_id=? AND source=?",
@@ -141,7 +149,8 @@ class Downloader:
         cached = {(s["source"], s["song_id"]): s["cli_id"] for s in self.run("playlist", "show", playlist["id"])}
         for track in tracks:
             track["cli_id"] = cached[track["source"], track["song_id"]]
-        print(f"音源：{api['name']}；歌单：{playlist['name']}；选中 {len(tracks)} 首", flush=True)
+        print(f"音源：{source['name']}；歌单：{playlist['name']}；选中 {len(tracks)} 首", flush=True)
+        return source["name"]
 
     def download(self, tracks, output, quality, timeout):
         output.mkdir(parents=True, exist_ok=True)
@@ -151,6 +160,13 @@ class Downloader:
             if not Path(track["file"]).exists():
                 pending.append(track["cli_id"])
         if pending:
+            # alx ignores a song already in its queue, including failed tasks.
+            # Requeue only missing files in this batch; leave active tasks alone.
+            with sqlite3.connect(self.home / "data/agent-lx-music.db") as db:
+                for track in tracks:
+                    if track["cli_id"] in pending:
+                        db.execute("DELETE FROM downloads WHERE source=? AND song_id=? AND status IN ('failed','completed')",
+                            (track["source"], track["song_id"]))
             self.run("download", "add", *pending, "--quality", quality)
         deadline = time.monotonic() + timeout
         finished = set()
@@ -164,7 +180,10 @@ class Downloader:
                 if path.exists():
                     self.finish(track, quality)
                     finished.add(index)
-                    print(f"[{len(finished)}/{len(tracks)}] {track['title']} · {track['kbps']} kbps · 歌词 {track['lyrics_characters']} 字", flush=True)
+                    if track["status"] == "downloaded":
+                        print(f"[{len(finished)}/{len(tracks)}] {track['title']} · {track['kbps']} kbps · 歌词 {track['lyrics_characters']} 字", flush=True)
+                    else:
+                        print(f"下载失败：{track['title']} · {track['error']}", flush=True)
                 elif states.get((track["source"], track["song_id"])) == "failed":
                     track["status"] = "failed"
                     track["error"] = "音源解析或下载失败；重新运行 download 可重试"
@@ -179,7 +198,18 @@ class Downloader:
     def finish(self, track, quality):
         path = Path(track["file"])
         audio = MP3(path)
+        if track["interval"]:
+            parts = [int(p) for p in track["interval"].split(":")]
+            expected = sum(value * 60 ** position for position, value in enumerate(reversed(parts)))
+            if expected and abs(audio.info.length - expected) > max(3, expected * 0.02):
+                rejected = path.with_name(f"{path.stem}.rejected-{time.time_ns()}.mp3")
+                path.rename(rejected)
+                track.update(status="failed", rejected_file=str(rejected),
+                    error=f"音源返回 {audio.info.length:.1f} 秒音频，与 LX 时长 {track['interval']} 不符；已保留样本，重新运行可重试")
+                return
         lyrics = track["lrc"]
+        if not lyrics and path.with_suffix(".lrc").exists():
+            lyrics = path.with_suffix(".lrc").read_text(encoding="utf-8-sig")
         if not lyrics and audio.tags and audio.tags.getall("USLT"):
             lyrics = audio.tags.getall("USLT")[0].text
         if lyrics:
