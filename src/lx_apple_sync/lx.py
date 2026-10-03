@@ -1,6 +1,7 @@
 """Read LX GUI data; delegate source execution and downloads to isolated alx."""
 import base64
 import json
+import html
 import os
 from pathlib import Path
 import re
@@ -9,6 +10,9 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 import zlib
 from datetime import datetime, timezone
 
@@ -66,6 +70,40 @@ def plain_lyrics(lrc):
     return "\n".join(line.strip() for line in re.sub(r"\[[^\]\n]*\]", "", lrc).splitlines() if line.strip())
 
 
+def seconds(interval):
+    return sum(int(value) * 60 ** position for position, value in enumerate(reversed(interval.split(":"))))
+
+
+def same_name(value):
+    return "".join(unicodedata.normalize("NFKC", html.unescape(value)).casefold().split())
+
+
+def missing_lyrics(text):
+    plain = plain_lyrics(text)
+    return not plain or ("纯音乐" in plain and len(plain) < 100) or bool(re.fullmatch(r"Object\(0x[0-9a-fA-F]+\)", plain))
+
+
+def kugou_lyrics(track, song_id, duration):
+    def fetch(path, params):
+        request = Request("http://lyrics.kugou.com/" + path + "?" + urlencode(params),
+            headers={"User-Agent": "KuGou2012-9020-ExpandSearchManager"})
+        with urlopen(request, timeout=15) as response:
+            return json.load(response)
+    try:
+        result = fetch("search", dict(ver=1, man="yes", client="pc", hash=song_id,
+            keyword=track["title"], timelength=round(duration), lrctxt=1))
+        base = same_name(track["title"].split(" / ")[0])
+        candidate = next((c for c in result.get("candidates", []) if same_name(c.get("song") or "").startswith(base)
+            and abs(c.get("duration", 0) / 1000 - duration) <= 3), None)
+        if candidate:
+            data = fetch("download", dict(ver=1, client="pc", id=candidate["id"],
+                accesskey=candidate["accesskey"], fmt="lrc", charset="utf8"))
+            return base64.b64decode(data["content"]).decode("utf-8-sig")
+    except (OSError, ValueError, KeyError):
+        pass
+    return ""
+
+
 def write_config(path, data):
     lines = []
     def section(values, keys):
@@ -93,14 +131,26 @@ class Downloader:
         self.binary = str(binary or (private if private.exists() else shutil.which("alx") or "alx"))
         self.env = {**os.environ, "ALX_HOME": str(self.home)}
 
-    def run(self, *args, json_output=True):
-        result = subprocess.run([self.binary, *args, "--json"], env=self.env, capture_output=True, text=True, timeout=90)
+    def run(self, *args, json_output=True, home=None):
+        env = self.env if home is None else {**self.env, "ALX_HOME": str(home)}
+        result = subprocess.run([self.binary, *args, "--json"], env=env, capture_output=True, text=True, timeout=90)
         if result.returncode:
             # Source errors can include credentials or signed URLs.
             raise RuntimeError(f"alx {args[0]} {args[1] if len(args)>1 else ''} 失败（退出码 {result.returncode}）")
         return json.loads(result.stdout) if json_output else None
 
     def prepare(self, playlist, tracks, output, source_script=None):
+        self.playlist = playlist
+        manifest = self.state / "manifests" / (playlist["id"] + ".json")
+        if manifest.exists():
+            previous = {t["gui_id"]: t for t in json.loads(manifest.read_text())["tracks"]}
+            for track in tracks:
+                old = previous.get(track["gui_id"], {})
+                canonical = output / f"{track['source']}_{track['song_id']}.mp3"
+                if canonical.exists() and old.get("file") == str(canonical):
+                    for key in ("resolved_source", "resolved_song_id", "resolved_title", "resolved_artist", "resolved_album"):
+                        if key in old:
+                            track.setdefault(key, old[key])
         settings = json.loads((self.gui / "config_v2.json").read_text())["setting"]
         if source_script:
             script = source_script.expanduser().read_text()
@@ -140,8 +190,9 @@ class Downloader:
             db.execute("UPDATE source_health SET consecutive_fails=0,circuit_broken_until=NULL WHERE source_id=?", (source["id"],))
             for track in tracks:
                 meta = track["meta"]
-                db.execute("UPDATE search_cache SET interval=?,album_id=?,pic_url=?,extra=? WHERE song_id=? AND source=?",
-                    (track["interval"], str(meta.get("albumId", "")), meta.get("picUrl"), json.dumps(meta, ensure_ascii=False), track["song_id"], track["source"]))
+                db.execute("UPDATE search_cache SET interval=?,album_id=?,pic_url=?,extra=?,hash=?,songmid=? WHERE song_id=? AND source=?",
+                    (track["interval"], str(meta.get("albumId", "")), meta.get("picUrl"), json.dumps(meta, ensure_ascii=False),
+                     meta.get("hash"), str(meta.get("songmid") or track["song_id"]), track["song_id"], track["source"]))
                 if track["lrc"]:
                     db.execute("INSERT OR REPLACE INTO lyrics_cache(song_id,source,lyric,cached_at) VALUES(?,?,?,?)",
                         (track["song_id"], track["source"], track["lrc"], now))
@@ -193,14 +244,71 @@ class Downloader:
                 raise TimeoutError(f"下载超过 {timeout} 秒；已完成文件保留，可重新运行")
             if len(finished) < len(tracks):
                 time.sleep(1)
+        return self.recover(tracks, output, quality, timeout)
+
+    def recover(self, tracks, output, quality, timeout):
+        failed = [t for t in tracks if t.get("status") == "failed" and t["source"] != "kg" and t["album"] and t["interval"]]
+        if not failed:
+            return tracks
+        print("原 ID 下载失败，按原版专辑、曲名和时长查找酷狗可用版本……", flush=True)
+        matched = []
+        for track in failed:
+            base_title = track["title"].split(" / ")[0]
+            queries = [track["title"], track["title"] + " " + re.sub(r"[^\w\s]", " ", track["album"]), base_title]
+            choice = None
+            for query in dict.fromkeys(queries):
+                try:
+                    choices = self.run("search", query, "--source", "kg", "--limit", "50", home=self.state / "catalog")
+                except (RuntimeError, subprocess.TimeoutExpired):
+                    continue
+                versions = [c for c in choices if same_name(c.get("album_name") or "") == same_name(track["album"])
+                    and c.get("interval") and abs(seconds(c["interval"]) - seconds(track["interval"])) <= 3]
+                original_name = lambda c: json.loads(c.get("extra") or "{}").get("original_name") or c["name"]
+                choice = next((c for c in versions if same_name(original_name(c)) == same_name(track["title"])), None)
+                if not choice and base_title != track["title"]:
+                    # Platforms can attach different version labels; require a
+                    # single recording with this base title, album and duration.
+                    candidates = {c["song_id"]: c for c in versions if same_name(original_name(c)) == same_name(base_title)}
+                    if len(candidates) == 1:
+                        choice = next(iter(candidates.values()))
+                if choice:
+                    break
+            if not choice:
+                continue
+            meta = json.loads(choice.get("extra") or "{}")
+            meta.update(albumId=choice.get("album_id"), picUrl=track["meta"].get("picUrl"))
+            alternative = {**track, "source": "kg", "song_id": choice["song_id"], "meta": meta}
+            matched.append((track, alternative, choice))
+            print(f"匹配原版：{track['title']} · {choice['album_name']}", flush=True)
+        if not matched:
+            return tracks
+        playlist = {**self.playlist, "id": self.playlist["id"] + "-kg"}
+        alternatives = [alternative for _, alternative, _ in matched]
+        self.prepare(playlist, alternatives, output, self.home / "selected-source.js")
+        config = self.run("config")
+        config["source"]["js_priority"] = False
+        write_config(self.home / "config.toml", config)
+        self.download(alternatives, output, quality, timeout)
+        for track, alternative, choice in matched:
+            if alternative["status"] != "downloaded":
+                continue
+            canonical = output / f"{track['source']}_{track['song_id']}.mp3"
+            Path(alternative["file"]).replace(canonical)
+            lrc = Path(alternative["lrc_file"]) if alternative.get("lrc_file") else None
+            if lrc:
+                lrc.replace(canonical.with_suffix(".lrc"))
+            track.update({key: alternative[key] for key in ("status", "requested_quality", "kbps", "duration_ms", "lyrics_characters", "cover")})
+            track.update(file=str(canonical), lrc_file=str(canonical.with_suffix(".lrc")) if lrc else None,
+                resolved_source="kg", resolved_song_id=alternative["song_id"],
+                resolved_title=choice["name"], resolved_artist=choice["singer"], resolved_album=choice["album_name"])
+            track.pop("error", None)
         return tracks
 
     def finish(self, track, quality):
         path = Path(track["file"])
         audio = MP3(path)
         if track["interval"]:
-            parts = [int(p) for p in track["interval"].split(":")]
-            expected = sum(value * 60 ** position for position, value in enumerate(reversed(parts)))
+            expected = seconds(track["interval"])
             if expected and abs(audio.info.length - expected) > max(3, expected * 0.02):
                 rejected = path.with_name(f"{path.stem}.rejected-{time.time_ns()}.mp3")
                 path.rename(rejected)
@@ -208,10 +316,22 @@ class Downloader:
                     error=f"音源返回 {audio.info.length:.1f} 秒音频，与 LX 时长 {track['interval']} 不符；已保留样本，重新运行可重试")
                 return
         lyrics = track["lrc"]
-        if not lyrics and path.with_suffix(".lrc").exists():
+        if missing_lyrics(lyrics) and path.with_suffix(".lrc").exists():
             lyrics = path.with_suffix(".lrc").read_text(encoding="utf-8-sig")
         if not lyrics and audio.tags and audio.tags.getall("USLT"):
             lyrics = audio.tags.getall("USLT")[0].text
+        if re.fullmatch(r"Object\(0x[0-9a-fA-F]+\)", lyrics.strip()):
+            # Earlier alx versions serialized a JS object pointer as lyric text.
+            lyrics = ""
+            if path.with_suffix(".lrc").exists():
+                path.with_suffix(".lrc").replace(path.with_suffix(".invalid-text.lrc"))
+            audio.tags.delall("USLT")
+            audio.save()
+        kg_id = track["song_id"] if track["source"] == "kg" else track.get("resolved_song_id") if track.get("resolved_source") == "kg" else None
+        if kg_id and missing_lyrics(lyrics):
+            fetched = kugou_lyrics(track, kg_id, audio.info.length)
+            if fetched and not missing_lyrics(fetched):
+                lyrics = fetched
         if lyrics:
             path.with_suffix(".lrc").write_text(lyrics)
             audio.tags.delall("USLT")

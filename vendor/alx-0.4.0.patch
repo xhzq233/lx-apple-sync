@@ -53,7 +53,7 @@ index c0d18fc..b2d6272 100644
 +        }
 +        let _child = command.spawn()?;
      }
- 
+
      Ok(())
 @@ -809,7 +827,9 @@ async fn execute_download_with_quality(
          .download
@@ -65,23 +65,23 @@ index c0d18fc..b2d6272 100644
 +        .replace("{source}", &task.source);
      let final_filename = format!("{}.{}", final_name, extension);
      let final_path = output_dir.join(&final_filename);
- 
+
 @@ -1008,6 +1028,7 @@ mod tests {
          let _ = fs::remove_dir_all(&proc_dir);
      }
- 
+
 +    #[cfg(not(target_os = "macos"))]
      #[test]
      fn test_pid_identity_assumes_alive_without_procfs() {
          // No procfs on this platform: identity cannot be verified.
 diff --git a/crates/lux-cli/src/source/mod.rs b/crates/lux-cli/src/source/mod.rs
-index 7fe9768..2eaec12 100644
+index 7fe9768..a8b62d5 100644
 --- a/crates/lux-cli/src/source/mod.rs
 +++ b/crates/lux-cli/src/source/mod.rs
 @@ -10,6 +10,22 @@ use lux_core::types::Source;
- 
+
  pub struct SourceManager;
- 
+
 +fn song_music_info(platform: &str, song_id: &str) -> serde_json::Value {
 +    let cached = crate::library::db::get_song_from_cache(song_id, platform)
 +        .ok()
@@ -112,10 +112,28 @@ index 7fe9768..2eaec12 100644
 -                        "hash": if platform == "kg" { Some(song_id) } else { None }
 -                    });
 +                    let music_info = song_music_info(platform, song_id);
- 
+
                      match sandbox.execute_resolve(
                          &script,
-@@ -254,12 +265,7 @@ impl SourceManager {
+@@ -162,9 +173,16 @@ impl SourceManager {
+                 let src_enum = Source::from(platform);
+                 if let Some(native_src) = lux_native::get_native_source(&src_enum) {
+                     lux_core::log_verbose!("Calling native get_url for platform '{}'", platform);
++                    let native_id = if platform == "kg" {
++                        let info = song_music_info(platform, song_id);
++                        info["meta"]["_types"][quality.as_str()]["hash"].as_str()
++                            .filter(|s| !s.is_empty())
++                            .or_else(|| info["hash"].as_str())
++                            .unwrap_or(song_id).to_string()
++                    } else { song_id.to_string() };
+                     let result = tokio::task::block_in_place(|| {
+                         let rt = tokio::runtime::Handle::current();
+-                        rt.block_on(async { native_src.get_url(song_id, quality).await })
++                        rt.block_on(async { native_src.get_url(&native_id, quality).await })
+                     });
+                     match result {
+                         Ok(url) => {
+@@ -254,12 +272,7 @@ impl SourceManager {
                  continue;
              };
              if let Ok(sandbox) = runtime::JsSandbox::new() {
@@ -126,11 +144,11 @@ index 7fe9768..2eaec12 100644
 -                    "hash": if platform == "kg" { Some(song_id) } else { None }
 -                });
 +                let music_info = song_music_info(platform, song_id);
- 
+
                  if let Ok(lyric_str) = sandbox.execute_lyric(&script, platform, song_id, music_info)
                  {
 diff --git a/crates/lux-cli/src/source/runtime.rs b/crates/lux-cli/src/source/runtime.rs
-index 53f35c9..087dc05 100644
+index 53f35c9..f8e52be 100644
 --- a/crates/lux-cli/src/source/runtime.rs
 +++ b/crates/lux-cli/src/source/runtime.rs
 @@ -131,30 +131,14 @@ impl JsSandbox {
@@ -141,7 +159,7 @@ index 53f35c9..087dc05 100644
 +        self.execute_init(script)?;
          let resolved_data = Arc::new(Mutex::new(None));
          let resolved_err = Arc::new(Mutex::new(None));
- 
+
          self.arm_deadline();
          let with_res = self.context.as_ref().unwrap().with(|ctx| -> Result<()> {
 -            let meta = super::loader::parse_metadata(script).ok();
@@ -168,11 +186,11 @@ index 53f35c9..087dc05 100644
                      .get("__lx_request_handler")
 @@ -286,7 +270,7 @@ impl JsSandbox {
      }
- 
+
      pub fn execute_init(&self, script: &str) -> Result<serde_json::Value> {
 -        let inited_data = Arc::new(Mutex::new(None));
 +        let mut init_state = None;
- 
+
          self.arm_deadline();
          let with_res = self.context.as_ref().unwrap().with(|ctx| -> Result<()> {
 @@ -301,15 +285,14 @@ impl JsSandbox {
@@ -180,28 +198,28 @@ index 53f35c9..087dc05 100644
              state_obj.raw_script = script.to_string();
              let state = Arc::new(Mutex::new(state_obj));
 +            init_state = Some(state.clone());
- 
+
              let res = (|| -> Result<()> {
                  super::bridge::inject_lx(&ctx, state.clone())?;
- 
+
 -                ctx.eval::<(), _>(script)
 +                ctx.eval::<(), _>(format!("(function() {{\n{script}\n}}).call(globalThis);"))
                      .map_err(|e| anyhow!("Failed to evaluate JS script during init: {}", e))?;
- 
+
 -                let mut inited_guard = inited_data.lock().unwrap();
 -                *inited_guard = state.lock().unwrap().inited_data.clone();
                  Ok(())
              })();
- 
+
 @@ -340,7 +323,7 @@ impl JsSandbox {
          with_res?;
          drained?;
- 
+
 -        let inited = inited_data.lock().unwrap().clone();
 +        let inited = init_state.and_then(|state| state.lock().unwrap().inited_data.clone());
          inited.ok_or_else(|| anyhow!("JS source did not invoke lx.send('inited', ...)"))
      }
- 
+
 @@ -351,30 +334,14 @@ impl JsSandbox {
          _song_id: &str,
          music_info: serde_json::Value,
@@ -210,7 +228,7 @@ index 53f35c9..087dc05 100644
 +        self.execute_init(script)?;
          let resolved_data = Arc::new(Mutex::new(None));
          let resolved_err = Arc::new(Mutex::new(None));
- 
+
          self.arm_deadline();
          let with_res = self.context.as_ref().unwrap().with(|ctx| -> Result<()> {
 -            let meta = super::loader::parse_metadata(script).ok();
@@ -235,6 +253,15 @@ index 53f35c9..087dc05 100644
                  let handler: Function = ctx
                      .globals()
                      .get("__lx_request_handler")
+@@ -437,7 +404,7 @@ impl JsSandbox {
+                         })?;
+
+                         let promise_helper: Function = ctx.eval(
+-                            " (promise, success, fail) => { promise.then(success, fail); } ",
++                            " (promise, success, fail) => { promise.then(value => success(typeof value === 'string' ? value : JSON.stringify(value)), fail); } ",
+                         )?;
+                         let _: Value = promise_helper.call((obj.clone(), success_cb, fail_cb))?;
+                     } else {
 @@ -515,30 +482,14 @@ impl JsSandbox {
          page: usize,
          limit: usize,
@@ -243,7 +270,7 @@ index 53f35c9..087dc05 100644
 +        self.execute_init(script)?;
          let resolved_data = Arc::new(Mutex::new(None));
          let resolved_err = Arc::new(Mutex::new(None));
- 
+
          self.arm_deadline();
          let with_res = self.context.as_ref().unwrap().with(|ctx| -> Result<()> {
 -            let meta = super::loader::parse_metadata(script).ok();
@@ -268,3 +295,99 @@ index 53f35c9..087dc05 100644
                  let handler: Function = ctx
                      .globals()
                      .get("__lx_request_handler")
+diff --git a/crates/lux-native/src/kg.rs b/crates/lux-native/src/kg.rs
+index d234df4..e00c3a6 100644
+--- a/crates/lux-native/src/kg.rs
++++ b/crates/lux-native/src/kg.rs
+@@ -1,7 +1,7 @@
+ use async_trait::async_trait;
+ use lux_core::error::SourceError;
+ use lux_core::traits::{LyricInfo, MusicSource};
+-use lux_core::types::{Quality, SearchResult, Source};
++use lux_core::types::{MusicInfo, Quality, SearchResult, Source};
+
+ #[derive(Default)]
+ pub struct KugouSource;
+@@ -16,21 +16,72 @@ impl MusicSource for KugouSource {
+         &[Quality::Q128k, Quality::Q320k, Quality::Flac]
+     }
+
++    // Uses the same public search endpoint and fields as LX Desktop's kg adapter.
+     async fn search(
+         &self,
+-        _keyword: &str,
+-        _page: usize,
+-        _limit: usize,
++        keyword: &str,
++        page: usize,
++        limit: usize,
+     ) -> Result<SearchResult, SourceError> {
+-        Err(SourceError::PlatformError(
+-            "Kugou native search not implemented yet".to_string(),
+-        ))
++        let result: serde_json::Value = crate::http::client()
++            .get("http://songsearch.kugou.com/song_search_v2")
++            .query(&[
++                ("platform", "AndroidFilter"), ("iscorrection", "1"),
++                ("keyword", keyword), ("hifiquality", "0"),
++                ("pagesize", &limit.to_string()), ("PrivilegeFilter", "0"),
++                ("page", &page.to_string()),
++            ])
++            .send().await.map_err(|e| SourceError::HttpError(e.to_string()))?
++            .json().await.map_err(|e| SourceError::HttpError(e.to_string()))?;
++        if result["error_code"].as_i64() != Some(0) {
++            return Err(SourceError::PlatformError("Kugou search failed".into()));
++        }
++        let mut list = Vec::new();
++        if let Some(items) = result["data"]["lists"].as_array() {
++            for item in items.iter().flat_map(|item| {
++                std::iter::once(item).chain(item["Grp"].as_array().into_iter().flatten())
++            }) {
++                let Some(hash) = item["FileHash"].as_str().filter(|s| !s.is_empty()) else { continue; };
++                let duration = item["Duration"].as_i64().unwrap_or(0);
++                let extra = serde_json::json!({
++                    "original_name": item["OriSongName"],
++                    "songmid": item["Audioid"].as_i64().map(|i| i.to_string()),
++                    "albumAudioId": item["MixSongID"],
++                    "hash": hash,
++                    "_types": {
++                        "128k": {"hash": hash},
++                        "320k": {"hash": item["HQFileHash"]},
++                        "flac": {"hash": item["SQFileHash"]}
++                    }
++                });
++                list.push(MusicInfo {
++                    songmid: hash.to_string(),
++                    name: item["OriSongName"].as_str().unwrap_or("").to_string()
++                        + item["Suffix"].as_str().filter(|s| !s.is_empty()).map(|s| format!(" {s}")).as_deref().unwrap_or(""),
++                    singer: item["SingerName"].as_str().unwrap_or("").to_string(),
++                    source: Source::Kugou,
++                    album_name: item["AlbumName"].as_str().map(str::to_string),
++                    album_id: item["AlbumID"].as_str().map(str::to_string),
++                    interval: Some(format!("{:02}:{:02}", duration / 60, duration % 60)),
++                    pic_url: None,
++                    hash: Some(hash.to_string()),
++                    extra: Some(extra.to_string()),
++                });
++            }
++        }
++        Ok(SearchResult { page, limit, total: result["data"]["total"].as_u64().unwrap_or(0) as usize, list })
+     }
+
+-    async fn get_url(&self, _song_id: &str, _quality: Quality) -> Result<String, SourceError> {
+-        Err(SourceError::PlatformError(
+-            "Kugou native get_url not implemented yet".to_string(),
+-        ))
++    async fn get_url(&self, song_id: &str, _quality: Quality) -> Result<String, SourceError> {
++        let result: serde_json::Value = crate::http::client()
++            .get("https://m.kugou.com/app/i/getSongInfo.php")
++            .query(&[("cmd", "playInfo"), ("hash", song_id)])
++            .header("User-Agent", "Mozilla/5.0")
++            .send().await.map_err(|e| SourceError::HttpError(e.to_string()))?
++            .json().await.map_err(|e| SourceError::HttpError(e.to_string()))?;
++        result["url"].as_str().filter(|url| url.starts_with("http"))
++            .map(str::to_string)
++            .ok_or_else(|| SourceError::PlatformError("No public playable Kugou audio".into()))
+     }
+
+     async fn get_lyric(&self, _song_id: &str) -> Result<Option<LyricInfo>, SourceError> {

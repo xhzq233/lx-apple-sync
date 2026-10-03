@@ -12,7 +12,7 @@ import time
 import uuid
 
 from . import device
-from .lx import Downloader, default_gui_dir, playlists, select_playlist
+from .lx import Downloader, default_gui_dir, missing_lyrics, playlists, select_playlist
 
 
 def emit(value):
@@ -98,6 +98,12 @@ async def import_batch(tracks, playlist, udid, state):
                         filename = "LX_" + uuid.uuid4().hex + ".mp3"
                         item, added = device.add_song(db, song, filename, None)
                         linked = ensure_playlist_member(db, item, playlist)
+                        lyrics_updated = False
+                        if not added and not missing_lyrics(song["lyrics"]):
+                            old = db.execute("SELECT lyrics FROM lyrics WHERE item_pid=?", (item,)).fetchone()
+                            if old and missing_lyrics(old[0] or ""):
+                                db.execute("UPDATE lyrics SET lyrics=? WHERE item_pid=?", (song["lyrics"], item))
+                                lyrics_updated = True
                         if added:
                             media.append(("/" + device.MUSIC_FOLDER + "/" + filename, path))
                             art = device.register_artwork(db, item, song["cover"])
@@ -105,12 +111,12 @@ async def import_batch(tracks, playlist, udid, state):
                                 artwork.append((device.ITUNES + "/Artwork/Originals/" + art[0], art[1]))
                         receipts.append(dict(title=song["title"], artist=song["artist"], item_pid=item,
                             status="added" if added else "already_present", playlist_added=linked,
-                            kbps=song["bitrate"], lyrics_characters=len(song["lyrics"]), cover=bool(song["cover"])))
+                            lyrics_updated=lyrics_updated, kbps=song["bitrate"], lyrics_characters=len(song["lyrics"]), cover=bool(song["cover"])))
                 if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise RuntimeError("媒体库检查失败")
             finally:
                 db.close()
-            changed = bool(media) or any(row["playlist_added"] for row in receipts)
+            changed = bool(media) or any(row["playlist_added"] or row["lyrics_updated"] for row in receipts)
             if changed:
                 await afc.makedirs("/" + device.MUSIC_FOLDER)
                 for remote, path in media:
@@ -187,9 +193,10 @@ def main():
         output = args.output.expanduser().resolve()
         source_name = engine.prepare(playlist, tracks, output, args.source_script)
         tracks = engine.download(tracks, output, args.quality, args.timeout)
+        manifest_path = engine.state / "manifests" / (playlist["id"] + ".json")
         manifest = dict(playlist=playlist, source_name=source_name,
             tracks=[{k: v for k, v in t.items() if k not in ("meta", "lrc")} for t in tracks])
-        save(engine.state / "manifests" / (playlist["id"] + ".json"), manifest)
+        save(manifest_path, manifest)
         if args.command == "sync":
             udid = args.udid
             if not udid:
