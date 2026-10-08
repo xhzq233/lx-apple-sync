@@ -36,7 +36,7 @@ uv run lxsync sync "精选金曲" --udid YOUR_DEVICE_UDID
 uv run lxsync sync NieR --quality 320k
 ```
 
-若本机装有 ios-use，同步会尝试自动退出设备上的「音乐」；没有安装则需先手动退出，无需为同步安装真机自动化驱动。导入不需要 Apple Music 订阅，也不需要先同步到 Mac「音乐」。默认使用 USB；本项目还没有验证 Wi-Fi 同步。
+若本机装有 ios-use，同步会尝试自动退出设备上的「音乐」；没有安装则需先手动退出，无需为同步安装真机自动化驱动。自动退出不可用时（例如设备未开启开发者模式），先在手机 App 切换器上划关闭「音乐」，再运行 `uv run lxsync sync NieR --music-closed`。导入不需要 Apple Music 订阅，也不需要先同步到 Mac「音乐」。默认使用 USB；本项目还没有验证 Wi-Fi 同步。
 
 `--quality 320k` 首先请求 320k。alx 可能在音源不支持时降级；结果记录实际码率，不会把 128k 标成 320k。
 
@@ -46,7 +46,7 @@ uv run lxsync sync NieR --quality 320k
 uv run lxsync sync NieR --source-script ~/Downloads/source.js
 ```
 
-这不会导入或切换 GUI 的音源。项目不分发音源脚本或卡密。音频时长会与 LX 歌单记录核对；返回广告、提示音或试听片段时保留 `.rejected-*.mp3` 样本、记录失败，不导入手机。完整解码和时长相符仍不能证明任意音源返回的内容一定是正确版本。
+这不会导入或切换 GUI 的音源。项目不分发音源脚本或卡密。音频时长会与 LX 歌单记录核对；网易歌曲不符时，会核查原歌曲 ID 的官方详情，仅在曲名、歌手和专辑都一致时使用官方时长修正过期的 LX 记录。仍不符的广告、提示音或试听片段会保留为 `.rejected-*.mp3` 样本、记录失败，不导入手机。完整解码和时长相符仍不能证明任意音源返回的内容一定是正确版本。
 
 ## 音源恢复与歌词
 

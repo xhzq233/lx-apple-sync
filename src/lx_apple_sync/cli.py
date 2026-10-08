@@ -61,21 +61,22 @@ def ensure_playlist_member(db, item, name):
 
 def quit_music(udid):
     if shutil.which("ios-use"):
-        result = subprocess.run(["ios-use", "terminateApp", "com.apple.Music", "--udid", udid],
+        result = subprocess.run(["ios-use", "terminateApp", "com.apple.Music", "--device", udid, "--udid", udid],
             capture_output=True, text=True, timeout=30)
         if result.returncode:
-            raise RuntimeError("无法退出设备上的音乐 App，请手动退出后重试")
+            raise RuntimeError("无法自动退出设备上的音乐 App，请手动退出后用 --music-closed 重试")
     else:
         print("同步前请确认设备上的音乐 App 已退出。", file=sys.stderr)
 
 
-async def import_batch(tracks, playlist, udid, state):
+async def import_batch(tracks, playlist, udid, state, music_closed=False):
     files = [(track, Path(track["file"]), Path(track["lrc_file"]) if track.get("lrc_file") else None)
              for track in tracks if track.get("status") == "downloaded"]
     songs = [(track, path, device.song_metadata(path, lrc)) for track, path, lrc in files]
     if not songs:
         raise ValueError("没有成功下载的 MP3 可以同步")
-    quit_music(udid)
+    if not music_closed:
+        quit_music(udid)
     phone = await device.create_using_usbmux(serial=udid, autopair=False, connection_type="USB")
     session = state / "backups" / (datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6])
     uploaded = []
@@ -178,6 +179,7 @@ def main():
         action.add_argument("--timeout", type=int, default=600)
         if name == "sync":
             action.add_argument("--udid")
+            action.add_argument("--music-closed", action="store_true", help="已手动退出设备上的音乐 App，跳过自动退出")
     args = parser.parse_args()
     try:
         if args.command == "playlists":
@@ -204,7 +206,7 @@ def main():
                 if len(devices) != 1:
                     raise ValueError("需要恰好一台已配对 USB 设备，或使用 --udid 选择目标")
                 udid = devices[0]["udid"]
-            result = asyncio.run(import_batch(tracks, playlist["name"], udid, engine.state))
+            result = asyncio.run(import_batch(tracks, playlist["name"], udid, engine.state, args.music_closed))
             save(engine.state / "last-sync.json", result)
             emit(result)
         else:

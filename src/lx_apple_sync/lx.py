@@ -78,6 +78,23 @@ def same_name(value):
     return "".join(unicodedata.normalize("NFKC", html.unescape(value)).casefold().split())
 
 
+def provider_duration(track):
+    if track["source"] != "wy":
+        return None
+    url = "https://music.163.com/api/song/detail?" + urlencode({"id": track["song_id"], "ids": "[" + track["song_id"] + "]"})
+    try:
+        with urlopen(url, timeout=15) as response:
+            songs = json.load(response).get("songs", [])
+        for song in songs:
+            if (str(song["id"]) == track["song_id"] and same_name(song["name"]) == same_name(track["title"])
+                and same_name(song["album"]["name"]) == same_name(track["album"])
+                and same_name("、".join(a["name"] for a in song["artists"])) == same_name(track["artist"])):
+                return song["duration"] / 1000
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
 def missing_lyrics(text):
     plain = plain_lyrics(text)
     return not plain or ("纯音乐" in plain and len(plain) < 100) or bool(re.fullmatch(r"Object\(0x[0-9a-fA-F]+\)", plain))
@@ -148,7 +165,7 @@ class Downloader:
                 old = previous.get(track["gui_id"], {})
                 canonical = output / f"{track['source']}_{track['song_id']}.mp3"
                 if canonical.exists() and old.get("file") == str(canonical):
-                    for key in ("resolved_source", "resolved_song_id", "resolved_title", "resolved_artist", "resolved_album"):
+                    for key in ("resolved_source", "resolved_song_id", "resolved_title", "resolved_artist", "resolved_album", "verified_duration_ms", "duration_source"):
                         if key in old:
                             track.setdefault(key, old[key])
         settings = json.loads((self.gui / "config_v2.json").read_text())["setting"]
@@ -309,6 +326,12 @@ class Downloader:
         audio = MP3(path)
         if track["interval"]:
             expected = seconds(track["interval"])
+            if expected and abs(audio.info.length - expected) > max(3, expected * 0.02):
+                confirmed = track["verified_duration_ms"] / 1000 if track.get("verified_duration_ms") else provider_duration(track)
+                if confirmed:
+                    expected = confirmed
+                    track["verified_duration_ms"] = round(confirmed * 1000)
+                    track["duration_source"] = "netease-song-detail"
             if expected and abs(audio.info.length - expected) > max(3, expected * 0.02):
                 rejected = path.with_name(f"{path.stem}.rejected-{time.time_ns()}.mp3")
                 path.rename(rejected)
