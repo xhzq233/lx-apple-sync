@@ -1,0 +1,41 @@
+name: Windows
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "vendor/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      LXSYNC_STATE_DIR: ${{ runner.temp }}/lxsync-alx
+      PYTHONUTF8: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: |
+          python -m pip install uv
+          uv sync --python 3.12
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Build and install patched alx
+        run: uv run python scripts/install-alx.py
+      - name: Download through the real Windows CLI
+        run: uv run python tests/e2e_download.py

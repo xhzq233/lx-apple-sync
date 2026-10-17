@@ -134,7 +134,7 @@ def write_config(path, data):
             if isinstance(value, dict):
                 section(value, [*keys, key])
     section(data, [])
-    path.write_text("\n".join(lines))
+    path.write_text("\n".join(lines), encoding="utf-8")
     path.chmod(0o600)
 
 
@@ -144,13 +144,13 @@ class Downloader:
         self.gui = gui.expanduser().resolve()
         self.home = self.state / "alx"
         self.home.mkdir(parents=True, exist_ok=True)
-        private = self.state / "bin/alx"
+        private = self.state / "bin" / ("alx.exe" if sys.platform == "win32" else "alx")
         self.binary = str(binary or (private if private.exists() else shutil.which("alx") or "alx"))
         self.env = {**os.environ, "ALX_HOME": str(self.home)}
 
     def run(self, *args, json_output=True, home=None):
         env = self.env if home is None else {**self.env, "ALX_HOME": str(home)}
-        result = subprocess.run([self.binary, *args, "--json"], env=env, capture_output=True, text=True, timeout=90)
+        result = subprocess.run([self.binary, *args, "--json"], env=env, capture_output=True, text=True, encoding="utf-8", timeout=90)
         if result.returncode:
             # Source errors can include credentials or signed URLs.
             raise RuntimeError(f"alx {args[0]} {args[1] if len(args)>1 else ''} 失败（退出码 {result.returncode}）")
@@ -160,7 +160,7 @@ class Downloader:
         self.playlist = playlist
         manifest = self.state / "manifests" / (playlist["id"] + ".json")
         if manifest.exists():
-            previous = {t["gui_id"]: t for t in json.loads(manifest.read_text())["tracks"]}
+            previous = {t["gui_id"]: t for t in json.loads(manifest.read_text(encoding="utf-8"))["tracks"]}
             for track in tracks:
                 old = previous.get(track["gui_id"], {})
                 canonical = output / f"{track['source']}_{track['song_id']}.mp3"
@@ -168,21 +168,21 @@ class Downloader:
                     for key in ("resolved_source", "resolved_song_id", "resolved_title", "resolved_artist", "resolved_album", "verified_duration_ms", "duration_source"):
                         if key in old:
                             track.setdefault(key, old[key])
-        settings = json.loads((self.gui / "config_v2.json").read_text())["setting"]
+        settings = json.loads((self.gui / "config_v2.json").read_text(encoding="utf-8-sig"))["setting"]
         if source_script:
-            script = source_script.expanduser().read_text()
+            script = source_script.expanduser().read_text(encoding="utf-8-sig")
         else:
-            api = next((s for s in json.loads((self.gui / "user_api.json").read_text())["userApis"] if s["id"] == settings["common.apiSource"]), None)
+            api = next((s for s in json.loads((self.gui / "user_api.json").read_text(encoding="utf-8-sig"))["userApis"] if s["id"] == settings["common.apiSource"]), None)
             if not api:
                 raise ValueError("请在 LX 选中自定义音源，或用 --source-script 指定音源脚本")
             script = api["script"]
             if script.startswith("gz_"):
                 script = zlib.decompress(base64.b64decode(script[3:])).decode()
         source_path = self.home / "selected-source.js"
-        source_path.write_text(script)
+        source_path.write_text(script, encoding="utf-8")
         source_path.chmod(0o600)
         self.run("source", "add", str(source_path), json_output=False)
-        source = next(s for s in self.run("source", "list") if Path(s["script_path"]).read_text() == script)
+        source = next(s for s in self.run("source", "list") if Path(s["script_path"]).read_text(encoding="utf-8") == script)
         Path(source["script_path"]).chmod(0o600)
         config = self.run("config")
         config["source"].update(priority=[source["id"]], js_priority=True)
@@ -194,7 +194,7 @@ class Downloader:
             config["network"]["proxy"] = f'http://{settings["network.proxy.host"]}:{settings["network.proxy.port"]}'
         write_config(self.home / "config.toml", config)
         export = self.home / "selected-playlist.json"
-        export.write_text(json.dumps([dict(title=t["title"], artist=t["artist"], album=t["album"], song_id=t["song_id"], source=t["source"]) for t in tracks], ensure_ascii=False))
+        export.write_text(json.dumps([dict(title=t["title"], artist=t["artist"], album=t["album"], song_id=t["song_id"], source=t["source"]) for t in tracks], ensure_ascii=False), encoding="utf-8")
         names = {p[0] for p in self.run("playlist", "list")}
         if playlist["id"] in names:
             self.run("playlist", "delete", playlist["id"])
@@ -356,7 +356,7 @@ class Downloader:
             if fetched and not missing_lyrics(fetched):
                 lyrics = fetched
         if lyrics:
-            path.with_suffix(".lrc").write_text(lyrics)
+            path.with_suffix(".lrc").write_text(lyrics, encoding="utf-8")
             audio.tags.delall("USLT")
             audio.tags.add(USLT(encoding=3, lang="und", desc="", text=plain_lyrics(lyrics)))
             audio.save()

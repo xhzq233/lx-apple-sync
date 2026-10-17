@@ -3,7 +3,7 @@ import argparse
 import asyncio
 from datetime import datetime
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
 import subprocess
@@ -21,7 +21,7 @@ def emit(value):
 
 def save(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2))
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 async def connected():
@@ -125,7 +125,7 @@ async def import_batch(tracks, playlist, udid, state, music_closed=False):
                     uploaded.append(remote)
                     print(f"已上传音频：{path.name}", flush=True)
                 for remote, data in artwork:
-                    await afc.makedirs(str(Path(remote).parent))
+                    await afc.makedirs(str(PurePosixPath(remote).parent))
                     await afc.set_file_contents(remote, data)
                     uploaded.append(remote)
                 await device.replace_database(afc, staged, session.name)
@@ -162,6 +162,9 @@ async def import_batch(tracks, playlist, udid, state, music_closed=False):
 
 
 def main():
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gui-dir", type=Path, default=default_gui_dir())
     parser.add_argument("--state-dir", type=Path, default=Path.home() / ".local/share/lx-apple-sync")
