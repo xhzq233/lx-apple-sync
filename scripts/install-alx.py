@@ -9,6 +9,7 @@ import sys
 def main():
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
     project = Path(__file__).resolve().parent.parent
     state = Path(os.environ.get("LXSYNC_STATE_DIR", Path.home() / ".local/share/lx-apple-sync")).expanduser().resolve()
     checkout = state / "vendor/agent-lx-music-v0.4.0"
@@ -16,13 +17,18 @@ def main():
     if not checkout.exists():
         subprocess.run(["git", "clone", "--depth", "1", "--branch", "v0.4.0",
             "https://github.com/Xuepoo/agent-lx-music.git", str(checkout)], check=True)
-    patch = str(project / "vendor/alx-0.4.0.patch")
-    applied = subprocess.run(["git", "-C", str(checkout), "apply", "--reverse", "--check", patch],
+    patch = (project / "vendor/alx-0.4.0.patch").read_bytes().replace(b"\r\n", b"\n")
+    applied = subprocess.run(["git", "-C", str(checkout), "apply", "--reverse", "--check"], input=patch,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if applied.returncode:
-        subprocess.run(["git", "-C", str(checkout), "apply", patch], check=True)
+        subprocess.run(["git", "-C", str(checkout), "apply"], input=patch, check=True)
+    env = os.environ.copy()
+    if sys.platform == "win32" and not env.get("LIBCLANG_PATH"):
+        clang = Path(env.get("ProgramFiles", "C:/Program Files")) / "LLVM/bin"
+        if (clang / "libclang.dll").is_file():
+            env["LIBCLANG_PATH"] = str(clang)
     subprocess.run(["cargo", "build", "--manifest-path", str(checkout / "Cargo.toml"),
-        "--release", "--bin", "alx"], check=True)
+        "--release", "--bin", "alx"], env=env, check=True)
     name = "alx.exe" if sys.platform == "win32" else "alx"
     target = Path(os.environ.get("CARGO_TARGET_DIR", checkout / "target"))
     destination = state / "bin" / name

@@ -12,7 +12,9 @@
 
 ## 安装与运行
 
-当前实测 **macOS + USB iPhone**。需要 Python 3.12+、[uv](https://docs.astral.sh/uv/getting-started/installation/)、Git 和 [Rust](https://www.rust-lang.org/tools/install)。LX Music 桌面版需已选中可用的自定义音源。
+需要 Python 3.12+、[uv](https://docs.astral.sh/uv/getting-started/installation/)、Git 和 [Rust](https://www.rust-lang.org/tools/install)。LX Music 桌面版需已选中可用的自定义音源。
+
+Windows 使用原生 PowerShell，并安装 [iTunes](https://www.apple.com/itunes/download/win64) 提供的 Apple Mobile Device Service；构建下载器还需要 Visual Studio C++ 生成工具和 [LLVM](https://releases.llvm.org/)（libclang）。iTunes 在这里用于设备连接，歌曲由本工具直接导入。
 
 首次安装：
 
@@ -20,7 +22,7 @@
 git clone https://github.com/xhzq233/lx-apple-sync.git
 cd lx-apple-sync
 uv sync
-sh scripts/install-alx.sh
+uv run python scripts/install-alx.py
 ```
 
 用 USB 连接手机并信任电脑，在手机 App 切换器上划关闭「音乐」，然后运行：
@@ -45,7 +47,7 @@ uv run lxsync sync "精选金曲" --music-closed
 
 ## 使用说明
 
-- 目前导入 MP3，歌词为静态文本。iPad、Windows、Linux、Wi-Fi 尚未实测。
+- 目前导入 MP3，歌词为静态文本。macOS + USB iPhone 已实测；Windows 已做兼容适配，USB 真机同步尚未验证。iPad、Linux、Wi-Fi 尚未实测。
 - 同步为增量追加：已有歌曲直接复用，不清空设备歌曲或重排已有条目；重跑可重试下载失败的歌曲。改变音质选项不会自动升级已有音频。
 - 每批导入前自动备份媒体库。音频与 LRC 保存在 `~/Music/LX-Apple-Sync/`，备份与同步结果在 `~/.local/share/lx-apple-sync/`。
 - 音源脚本与凭据由你的 LX 配置提供，项目不分发。可用性与实际音质由音源决定。
