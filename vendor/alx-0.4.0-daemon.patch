@@ -1,0 +1,54 @@
+diff --git a/crates/lux-cli/src/cmd/download.rs b/crates/lux-cli/src/cmd/download.rs
+index b2d6272..4c7c897 100644
+--- a/crates/lux-cli/src/cmd/download.rs
++++ b/crates/lux-cli/src/cmd/download.rs
+@@ -124,6 +124,7 @@ pub fn download_add_ids(
+ pub async fn run(action: DownloadAction, json: bool) -> Result<()> {
+     match action {
+         DownloadAction::Add { ids, quality, file } => {
++            let from_file = file.is_some();
+             let mut added_songs = Vec::new();
+ 
+             if let Some(file_path_str) = file {
+@@ -205,9 +206,9 @@ pub async fn run(action: DownloadAction, json: bool) -> Result<()> {
+                 added_songs = download_add_ids(&ids, quality)?;
+             }
+ 
+-            // Lazy spawn daemon if not running (idempotent; also covers the
+-            // playlist-file branch above)
+-            if !added_songs.is_empty() {
++            // download_add_ids already starts the daemon. Starting it again
++            // before its pidfile is written can launch a second worker.
++            if from_file && !added_songs.is_empty() {
+                 ensure_daemon_running()?;
+             }
+ 
+@@ -365,7 +366,27 @@ pub(crate) fn daemon_pid_alive(pid_file: &Path, proc_dir: &Path) -> bool {
+     fs::read_to_string(pid_file)
+         .ok()
+         .and_then(|content| content.trim().parse::<u32>().ok())
+-        .map(|pid| pid_is_live_daemon(pid, proc_dir))
++        .map(|pid| {
++            #[cfg(target_os = "windows")]
++            {
++                let _ = proc_dir;
++                return Command::new("tasklist")
++                    .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
++                    .output()
++                    .ok()
++                    .filter(|output| output.status.success())
++                    .map(|output| {
++                        String::from_utf8_lossy(&output.stdout)
++                            .split('"')
++                            .nth(1)
++                            .map(|name| name.eq_ignore_ascii_case("alx.exe"))
++                            .unwrap_or(false)
++                    })
++                    .unwrap_or(false);
++            }
++            #[cfg(not(target_os = "windows"))]
++            pid_is_live_daemon(pid, proc_dir)
++        })
+         .unwrap_or(false)
+ }
+ 

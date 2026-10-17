@@ -3,6 +3,7 @@
 No private LX data, third-party music, or physical device is used.
 """
 import base64
+from contextlib import closing
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -63,7 +64,7 @@ lx.on('request', async ({action}) => {
         (gui / "config_v2.json").write_text(json.dumps({"setting": {"common.apiSource": "test"}}), encoding="utf-8-sig")
         (gui / "user_api.json").write_text(json.dumps({"userApis": [{"id": "test", "script": script}]}, ensure_ascii=False), encoding="utf-8")
         titles = ["中文曲目", "日本語の曲"]
-        with sqlite3.connect(gui / "lx.data.db") as db:
+        with closing(sqlite3.connect(gui / "lx.data.db")) as db:
             db.executescript('''
                 CREATE TABLE my_list (id TEXT, name TEXT, position INTEGER);
                 CREATE TABLE my_list_music_info (id TEXT, listId TEXT, source TEXT, name TEXT, singer TEXT, interval TEXT, meta TEXT);
@@ -78,6 +79,7 @@ lx.on('request', async ({action}) => {
                     (identifier, title, json.dumps(meta, ensure_ascii=False)))
                 db.execute('INSERT INTO my_list_music_info_order VALUES (\'test-list\', ?, ?)', (identifier, index))
                 db.execute("INSERT INTO lyric VALUES (?, 'raw', 'lyric', ?)", (identifier, base64.b64encode(lyrics.encode()).decode()))
+            db.commit()
         env = {**os.environ, "APPDATA": str(appdata)}
         cli = [shutil.which("lxsync"), "--state-dir", str(state)]
         if sys.platform != "win32":
@@ -89,6 +91,15 @@ lx.on('request', async ({action}) => {
             if result.returncode:
                 raise RuntimeError(result.stderr)
             return result.stdout
+
+        def stop_daemon():
+            pidfile = state / "alx/cache/download.pid"
+            if pidfile.exists():
+                try:
+                    os.kill(int(pidfile.read_text()), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                time.sleep(0.2)
 
         try:
             lists = json.loads(run("playlists"))
@@ -109,17 +120,21 @@ lx.on('request', async ({action}) => {
             assert downloads == 2, requests
             run(*args)
             assert requests.count("/tone.mp3") == downloads, "Repeat downloaded the audio again"
-            with sqlite3.connect(gui / "lx.data.db") as db:
-                assert db.execute("SELECT COUNT(*) FROM my_list_music_info").fetchone()[0] == 2
-            print("PASS: real source execution, 2 MP3 downloads, Unicode paths/tags/lyrics, covers, and cached repeat")
-        finally:
             pidfile = state / "alx/cache/download.pid"
-            if pidfile.exists():
-                try:
-                    os.kill(int(pidfile.read_text()), signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                time.sleep(0.2)
+            running_pid = int(pidfile.read_text())
+            Path(tracks[0]["file"]).unlink()
+            run(*args)
+            assert requests.count("/tone.mp3") == downloads + 1
+            assert int(pidfile.read_text()) == running_pid, "A live daemon was started again"
+            stop_daemon()
+            Path(tracks[1]["file"]).unlink()
+            run(*args)
+            assert requests.count("/tone.mp3") == downloads + 2, "Stale daemon PID prevented a new download"
+            with closing(sqlite3.connect(gui / "lx.data.db")) as db:
+                assert db.execute("SELECT COUNT(*) FROM my_list_music_info").fetchone()[0] == 2
+            print("PASS: real source execution, 2 MP3 downloads, Unicode paths/tags/lyrics, covers, cached repeat, and daemon restart")
+        finally:
+            stop_daemon()
             server.shutdown()
             server.server_close()
 

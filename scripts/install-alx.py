@@ -17,11 +17,12 @@ def main():
     if not checkout.exists():
         subprocess.run(["git", "clone", "--depth", "1", "--branch", "v0.4.0",
             "https://github.com/Xuepoo/agent-lx-music.git", str(checkout)], check=True)
-    patch = (project / "vendor/alx-0.4.0.patch").read_bytes().replace(b"\r\n", b"\n")
-    applied = subprocess.run(["git", "-C", str(checkout), "apply", "--reverse", "--check"], input=patch,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if applied.returncode:
-        subprocess.run(["git", "-C", str(checkout), "apply"], input=patch, check=True)
+    for name in ("alx-0.4.0.patch", "alx-0.4.0-daemon.patch"):
+        patch = (project / "vendor" / name).read_bytes().replace(b"\r\n", b"\n")
+        applied = subprocess.run(["git", "-C", str(checkout), "apply", "--reverse", "--check"], input=patch,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if applied.returncode:
+            subprocess.run(["git", "-C", str(checkout), "apply"], input=patch, check=True)
     env = os.environ.copy()
     if sys.platform == "win32" and not env.get("LIBCLANG_PATH"):
         clang = Path(env.get("ProgramFiles", "C:/Program Files")) / "LLVM/bin"
